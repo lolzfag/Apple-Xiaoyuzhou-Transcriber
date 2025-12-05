@@ -1,0 +1,17 @@
+# Environment variables (contains secrets!)
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+
+# Transcripts (generated files)
+transcripts/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store
