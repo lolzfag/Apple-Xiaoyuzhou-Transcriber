@@ -2,7 +2,9 @@ import os
 import re
 import time
 import pathlib
-from typing import Optional
+from typing import Optional, Tuple
+from urllib.parse import urlparse, parse_qs
+import xml.etree.ElementTree as ET
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -38,16 +40,19 @@ HTML = """<!doctype html>
 </head>
 <body>
   <main>
-    <h1>小宇宙转录</h1>
-    <p>粘贴小宇宙节目链接，点击转录，会自动抓取音频地址并生成文本。</p>
+    <h1>播客转录</h1>
+    <p>粘贴小宇宙或 Apple 播客节目链接，自动抓取音频并生成文本（当前默认中文转录）。</p>
     <form id="form">
-      <input id="url" name="url" type="url" placeholder="https://www.xiaoyuzhoufm.com/episode/..." required>
+      <input id="url" name="url" type="url" placeholder="https://www.xiaoyuzhoufm.com/episode/... 或 https://podcasts.apple.com/..." required>
       <button id="submit" type="submit">转录</button>
     </form>
+    <div style="display:flex; gap:12px; align-items:center; margin-bottom:12px;">
+      <button id="copy" type="button" disabled>复制全部</button>
+      <a id="download" href="#" style="display:none;">下载 .txt</a>
+    </div>
     <div id="status"></div>
     <div id="meta"></div>
     <pre id="result"></pre>
-    <p><a id="download" href="#" style="display:none;">下载 .txt</a></p>
   </main>
   <script>
     const form = document.getElementById("form");
@@ -56,6 +61,7 @@ HTML = """<!doctype html>
     const resultEl = document.getElementById("result");
     const downloadEl = document.getElementById("download");
     const submitBtn = document.getElementById("submit");
+    const copyBtn = document.getElementById("copy");
 
     form.addEventListener("submit", async (e) => {
       e.preventDefault();
@@ -65,7 +71,13 @@ HTML = """<!doctype html>
       metaEl.textContent = "";
       downloadEl.style.display = "none";
       submitBtn.disabled = true;
-      statusEl.textContent = "Pulling audio URL and transcribing...";
+      copyBtn.disabled = true;
+      statusEl.textContent = "Pulling audio URL and transcribing (may take 30-90s)";
+      let dots = 0;
+      const tick = setInterval(() => {
+        dots = (dots + 1) % 4;
+        statusEl.textContent = "Transcribing" + ".".repeat(dots);
+      }, 800);
 
       try {
         const res = await fetch("/api/transcribe", {
@@ -76,6 +88,7 @@ HTML = """<!doctype html>
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || "Transcription failed");
 
+        clearInterval(tick);
         statusEl.textContent = "Done";
         metaEl.textContent = `Audio: ${data.audio_url}`;
         resultEl.textContent = data.transcript || "";
@@ -83,11 +96,21 @@ HTML = """<!doctype html>
           downloadEl.href = data.file;
           downloadEl.style.display = "inline";
         }
+        if (data.transcript) {
+          copyBtn.disabled = false;
+        }
       } catch (err) {
+        clearInterval(tick);
         statusEl.textContent = err.message;
       } finally {
         submitBtn.disabled = false;
       }
+    });
+
+    copyBtn.addEventListener("click", async () => {
+      if (!resultEl.textContent) return;
+      await navigator.clipboard.writeText(resultEl.textContent);
+      statusEl.textContent = "已复制";
     });
   </script>
 </body>
@@ -96,15 +119,84 @@ HTML = """<!doctype html>
 
 
 def find_audio_url(html: str) -> Optional[str]:
-    match = re.search(r'<audio[^>]+src="([^"]+\\.m4a[^"]*)"', html, flags=re.IGNORECASE)
+    match = re.search(r'<audio[^>]+src="([^"]+\.(?:m4a|mp3)[^"]*)"', html, flags=re.IGNORECASE)
     return match.group(1) if match else None
 
 
+def parse_apple_url(url: str) -> Tuple[Optional[str], Optional[str]]:
+    parsed = urlparse(url)
+    qs = parse_qs(parsed.query)
+    episode_id = (qs.get("i") or [None])[0]
+    podcast_id_match = re.search(r"/id(\d+)", parsed.path)
+    podcast_id = podcast_id_match.group(1) if podcast_id_match else None
+    return podcast_id, episode_id
+
+
+def fetch_feed_url(podcast_id: str) -> str:
+    resp = requests.get(
+        f"https://itunes.apple.com/lookup?id={podcast_id}&entity=podcast",
+        timeout=20,
+    )
+    resp.raise_for_status()
+    results = resp.json().get("results") or []
+    if not results or not results[0].get("feedUrl"):
+        raise RuntimeError("Feed URL not found from iTunes lookup.")
+    return results[0]["feedUrl"]
+
+
+def find_episode_audio(feed_url: str, episode_id: Optional[str]) -> str:
+    resp = requests.get(feed_url, timeout=20)
+    resp.raise_for_status()
+    root = ET.fromstring(resp.content)
+    channel = root.find("channel")
+    if channel is None:
+        raise RuntimeError("Invalid RSS feed.")
+
+    def enclosure_url(item: ET.Element) -> Optional[str]:
+        enc = item.find("enclosure")
+        return enc.attrib.get("url") if enc is not None else None
+
+    for item in channel.findall("item"):
+        guid = (item.findtext("guid") or "").strip()
+        if episode_id and episode_id in guid:
+            url = enclosure_url(item)
+            if url:
+                return url
+
+    for item in channel.findall("item"):
+        url = enclosure_url(item)
+        if url:
+            return url
+
+    raise RuntimeError("Audio URL not found in RSS.")
+
+
+def ms_to_ts(ms: int) -> str:
+    seconds = ms // 1000
+    return f"{seconds // 60:02d}:{seconds % 60:02d}"
+
+
+def format_transcript(text: str, utterances: Optional[list]) -> str:
+    if not utterances:
+        return text
+    parts = []
+    for utt in utterances:
+        start = ms_to_ts(int(utt.get("start", 0)))
+        speaker = utt.get("speaker", "S")
+        parts.append(f"[{start}] Speaker {speaker}: {utt.get('text','').strip()}")
+    return "\n".join(parts)
+
+
 def start_transcription(audio_url: str, headers: dict) -> str:
+    payload = {
+        "audio_url": audio_url,
+        "language_code": "zh",  # default to Chinese
+        "speaker_labels": True,  # request diarization/timestamps
+    }
     resp = requests.post(
         "https://api.assemblyai.com/v2/transcript",
         headers=headers,
-        json={"audio_url": audio_url},
+        json=payload,
         timeout=20,
     )
     resp.raise_for_status()
@@ -117,7 +209,10 @@ def poll_transcription(transcript_id: str, headers: dict) -> str:
         poll = requests.get(polling_endpoint, headers=headers, timeout=20).json()
         status = poll.get("status")
         if status == "completed":
-            return poll.get("text", "")
+            return {
+                "text": poll.get("text", ""),
+                "utterances": poll.get("utterances") or [],
+            }
         if status == "error":
             raise RuntimeError(poll.get("error", "AssemblyAI returned an error."))
         time.sleep(3)
@@ -137,31 +232,37 @@ def transcribe():
     if not episode_url:
         return jsonify({"error": "Missing episode URL."}), 400
 
-    try:
-        page = requests.get(episode_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
-        page.raise_for_status()
-    except Exception as exc:
-        return jsonify({"error": f"Failed to fetch episode page: {exc}"}), 502
-
-    audio_url = find_audio_url(page.text)
-    if not audio_url:
-        return jsonify({"error": "Audio src not found in page."}), 404
-
     headers = {"authorization": API_KEY}
     try:
+        if "xiaoyuzhoufm.com" in episode_url:
+            page = requests.get(episode_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
+            page.raise_for_status()
+            audio_url = find_audio_url(page.text)
+            if not audio_url:
+                return jsonify({"error": "Audio src not found in page."}), 404
+        elif "podcasts.apple.com" in episode_url:
+            podcast_id, epi_id = parse_apple_url(episode_url)
+            if not podcast_id:
+                return jsonify({"error": "Invalid Apple Podcasts URL."}), 400
+            feed_url = fetch_feed_url(podcast_id)
+            audio_url = find_episode_audio(feed_url, epi_id)
+        else:
+            return jsonify({"error": "Only Xiaoyuzhou or Apple podcast links are supported."}), 400
+
         transcript_id = start_transcription(audio_url, headers)
-        text = poll_transcription(transcript_id, headers)
+        transcript_data = poll_transcription(transcript_id, headers)
     except Exception as exc:
         return jsonify({"error": str(exc)}), 502
 
     filename = f"transcript-{int(time.time())}.txt"
     filepath = TRANSCRIPT_DIR / filename
-    filepath.write_text(text, encoding="utf-8")
+    formatted = format_transcript(transcript_data["text"], transcript_data.get("utterances"))
+    filepath.write_text(formatted, encoding="utf-8")
 
     return jsonify(
         {
             "audio_url": audio_url,
-            "transcript": text,
+            "transcript": formatted,
             "file": f"/transcripts/{filename}",
         }
     )

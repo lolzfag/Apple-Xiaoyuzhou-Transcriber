@@ -1,6 +1,6 @@
-# Xiaoyuzhou Transcript Helper
+# Podcast Transcript Helper
 
-Paste a Xiaoyuzhou episode URL, the app grabs the embedded audio URL, sends it to AssemblyAI for transcription, and saves the text as a `.txt` you can download.
+Paste a Xiaoyuzhou or Apple Podcasts episode URL, the app grabs the audio URL, sends it to AssemblyAI for transcription, and saves the text as a `.txt` you can download.
 
 ## Setup
 
@@ -19,4 +19,8 @@ Paste a Xiaoyuzhou episode URL, the app grabs the embedded audio URL, sends it t
 python app.py
 ```
 
-Open http://localhost:8000 in your browser, paste an episode link (e.g., `https://www.xiaoyuzhoufm.com/episode/...`), and click **转录**. When finished, the page shows the transcript and a link to download the `.txt` file.
+Open http://localhost:8000 in your browser, paste an episode link (e.g., `https://www.xiaoyuzhoufm.com/episode/...` or `https://podcasts.apple.com/...?...i=...`), and click **转录**. When finished, the page shows the transcript and a link to download the `.txt` file.
+
+## For further imporvement
+
+1. The chinese transcription accuracy is sub-par, need to look at a new provider for such
