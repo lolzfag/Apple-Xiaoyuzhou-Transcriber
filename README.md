@@ -1,6 +1,12 @@
-# Podcast Transcript Helper
+# Podcast Transcriptor
+
+Both Xiaoyuzhou & Apple doesn't allow you to directly get a transcript, so I made one.
+
+The interface is in chinese but should be intuitive enough for you to use. 
 
 Paste a Xiaoyuzhou or Apple Podcasts episode URL, the app grabs the audio URL, sends it to AssemblyAI for transcription, and saves the text as a `.txt` you can download.
+
+### The model currently is using AssemblyAI, switch to your own if you want others
 
 ## Setup
 
