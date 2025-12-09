@@ -25,7 +25,12 @@ Paste a Xiaoyuzhou or Apple Podcasts episode URL, the app grabs the audio URL, s
 python app.py
 ```
 
-Open http://localhost:8000 in your browser, paste an episode link (e.g., `https://www.xiaoyuzhoufm.com/episode/...` or `https://podcasts.apple.com/...?...i=...`), and click **转录**. When finished, the page shows the transcript and a link to download the `.txt` file.
+Open http://localhost:8000 in your browser, register/login with email + password (plain text), paste an episode link, and click **转录**. You can copy text or download the `.txt` file (with timestamps + speaker labels).
+
+## Vercel
+
+- Uses `/tmp/transcripts` for writes; `vercel.json` and `api/index.py` are set up for Python serverless via `vercel-serverless-wsgi`.
+- Deploy with `vercel` from this directory after setting env vars (e.g., `ASSEMBLYAI_API_KEY`, optional `SECRET_KEY`, `USERS_FILE` path).
 
 ## For further imporvement
 

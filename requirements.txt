@@ -1,4 +1,5 @@
 flask
 requests
 python-dotenv
+vercel-serverless-wsgi
 python-dotenv

@@ -1,8 +1,9 @@
 import os
 import re
+import json
 import time
 import pathlib
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict, Any
 from urllib.parse import urlparse, parse_qs
 import xml.etree.ElementTree as ET
 from dotenv import load_dotenv
@@ -10,13 +11,15 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import requests
-from flask import Flask, jsonify, request, send_from_directory, Response
+from flask import Flask, jsonify, request, send_from_directory, Response, session
 
 API_KEY = os.getenv("ASSEMBLYAI_API_KEY")
-TRANSCRIPT_DIR = pathlib.Path("transcripts")
-TRANSCRIPT_DIR.mkdir(exist_ok=True)
+TRANSCRIPT_DIR = pathlib.Path(os.getenv("TRANSCRIPT_DIR", "/tmp/transcripts"))
+TRANSCRIPT_DIR.mkdir(parents=True, exist_ok=True)
+USERS_FILE = pathlib.Path(os.getenv("USERS_FILE", "users.json"))
 
 app = Flask(__name__)
+app.secret_key = os.getenv("SECRET_KEY", "dev-secret")
 
 HTML = """<!doctype html>
 <html lang="en">
@@ -42,6 +45,16 @@ HTML = """<!doctype html>
   <main>
     <h1>播客转录</h1>
     <p>粘贴小宇宙或 Apple 播客节目链接，自动抓取音频并生成文本（当前默认中文转录）。</p>
+    <div id="auth">
+      <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:8px;">
+        <input id="email" type="email" placeholder="Email">
+        <input id="password" type="password" placeholder="Password">
+        <button id="register" type="button">注册</button>
+        <button id="login" type="button">登录</button>
+        <button id="logout" type="button" style="display:none;">退出</button>
+      </div>
+      <div id="auth-status" style="color:#9badc8; margin-bottom:12px;">未登录</div>
+    </div>
     <form id="form">
       <input id="url" name="url" type="url" placeholder="https://www.xiaoyuzhoufm.com/episode/... 或 https://podcasts.apple.com/..." required>
       <button id="submit" type="submit">转录</button>
@@ -62,9 +75,83 @@ HTML = """<!doctype html>
     const downloadEl = document.getElementById("download");
     const submitBtn = document.getElementById("submit");
     const copyBtn = document.getElementById("copy");
+    const registerBtn = document.getElementById("register");
+    const loginBtn = document.getElementById("login");
+    const logoutBtn = document.getElementById("logout");
+    const emailInput = document.getElementById("email");
+    const passwordInput = document.getElementById("password");
+    const authStatus = document.getElementById("auth-status");
+    let authed = false;
+
+    const updateAuthUI = (user) => {
+      authed = !!user;
+      authStatus.textContent = authed ? `已登录: ${user}` : "未登录";
+      logoutBtn.style.display = authed ? "inline-block" : "none";
+      loginBtn.style.display = authed ? "none" : "inline-block";
+      registerBtn.style.display = authed ? "none" : "inline-block";
+      submitBtn.disabled = !authed;
+    };
+
+    const checkAuth = async () => {
+      try {
+        const res = await fetch("/api/me");
+        const data = await res.json();
+        updateAuthUI(data.user || null);
+      } catch {
+        updateAuthUI(null);
+      }
+    };
+
+    registerBtn.addEventListener("click", async () => {
+      const email = emailInput.value.trim();
+      const password = passwordInput.value.trim();
+      if (!email || !password) {
+        authStatus.textContent = "请输入邮箱和密码";
+        return;
+      }
+      const res = await fetch("/api/register", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, password }),
+      });
+      const data = await res.json();
+      if (!res.ok) return (authStatus.textContent = data.error || "注册失败");
+      updateAuthUI(email);
+      authStatus.textContent = "注册成功";
+    });
+
+    loginBtn.addEventListener("click", async () => {
+      const email = emailInput.value.trim();
+      const password = passwordInput.value.trim();
+      if (!email || !password) {
+        authStatus.textContent = "请输入邮箱和密码";
+        return;
+      }
+      const res = await fetch("/api/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, password }),
+      });
+      const data = await res.json();
+      if (!res.ok) return (authStatus.textContent = data.error || "登录失败");
+      updateAuthUI(email);
+      authStatus.textContent = "登录成功";
+    });
+
+    logoutBtn.addEventListener("click", async () => {
+      await fetch("/api/logout", { method: "POST" });
+      updateAuthUI(null);
+      authStatus.textContent = "已退出";
+    });
+
+    checkAuth();
 
     form.addEventListener("submit", async (e) => {
       e.preventDefault();
+      if (!authed) {
+        statusEl.textContent = "请先登录";
+        return;
+      }
       const url = document.getElementById("url").value.trim();
       if (!url) return;
       resultEl.textContent = "";
@@ -118,9 +205,29 @@ HTML = """<!doctype html>
 """
 
 
+def load_users() -> Dict[str, Any]:
+    if not USERS_FILE.exists():
+        return {}
+    try:
+        return json.loads(USERS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def save_users(data: Dict[str, Any]) -> None:
+    if USERS_FILE.parent:
+        USERS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    USERS_FILE.write_text(json.dumps(data), encoding="utf-8")
+
+
 def find_audio_url(html: str) -> Optional[str]:
+    # Prefer explicit audio tag
     match = re.search(r'<audio[^>]+src="([^"]+\.(?:m4a|mp3)[^"]*)"', html, flags=re.IGNORECASE)
-    return match.group(1) if match else None
+    if match:
+        return match.group(1)
+    # Fallback: first direct m4a/mp3 URL anywhere in the page
+    alt = re.search(r'(https?://[^"\s]+\.(?:m4a|mp3)[^"\s<>]*)', html, flags=re.IGNORECASE)
+    return alt.group(1) if alt else None
 
 
 def parse_apple_url(url: str) -> Tuple[Optional[str], Optional[str]]:
@@ -203,7 +310,7 @@ def start_transcription(audio_url: str, headers: dict) -> str:
     return resp.json()["id"]
 
 
-def poll_transcription(transcript_id: str, headers: dict) -> str:
+def poll_transcription(transcript_id: str, headers: dict) -> Dict[str, Any]:
     polling_endpoint = f"https://api.assemblyai.com/v2/transcript/{transcript_id}"
     while True:
         poll = requests.get(polling_endpoint, headers=headers, timeout=20).json()
@@ -223,8 +330,50 @@ def index() -> Response:
     return Response(HTML, mimetype="text/html")
 
 
+@app.get("/api/me")
+def me():
+    return jsonify({"user": session.get("user")})
+
+
+@app.post("/api/register")
+def register():
+    data = request.get_json(silent=True) or {}
+    email = (data.get("email") or "").strip().lower()
+    password = data.get("password") or ""
+    if not email or not password:
+        return jsonify({"error": "邮箱和密码必填"}), 400
+    users = load_users()
+    if email in users:
+        return jsonify({"error": "该邮箱已注册"}), 400
+    users[email] = {"password": password}
+    save_users(users)
+    session["user"] = email
+    return jsonify({"user": email})
+
+
+@app.post("/api/login")
+def login():
+    data = request.get_json(silent=True) or {}
+    email = (data.get("email") or "").strip().lower()
+    password = data.get("password") or ""
+    users = load_users()
+    user = users.get(email)
+    if not user or user.get("password") != password:
+        return jsonify({"error": "邮箱或密码错误"}), 401
+    session["user"] = email
+    return jsonify({"user": email})
+
+
+@app.post("/api/logout")
+def logout():
+    session.pop("user", None)
+    return jsonify({"ok": True})
+
+
 @app.post("/api/transcribe")
 def transcribe():
+    if not session.get("user"):
+        return jsonify({"error": "请先登录"}), 401
     if not API_KEY:
         return jsonify({"error": "Set ASSEMBLYAI_API_KEY in your environment first."}), 500
     payload = request.get_json(silent=True) or {}
